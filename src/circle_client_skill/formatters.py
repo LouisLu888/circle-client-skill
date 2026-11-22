@@ -353,10 +353,17 @@ def format_auth_status(status: dict) -> str:
     cookie = "yes" if status.get("cookie_present") else "no"
     csrf = "yes" if status.get("csrf_present") else "no"
     jwt = "yes" if status.get("jwt_present") else "no"
-    return (
+    text = (
         f"configured: {configured}   host: {status.get('host', '')}\n"
         f"cookie: {cookie}   csrf: {csrf}   jwt: {jwt}"
     )
+    if "member_session" in status:
+        member = status["member_session"]
+        label = {True: "yes", False: "no (anonymous cookies; rerun configure-browser)"}.get(
+            member, f"unknown ({status.get('member_session_error', '')})"
+        )
+        text += f"\nmember session: {label}"
+    return text
 
 
 def format_fetch_summary(summary: dict) -> str:

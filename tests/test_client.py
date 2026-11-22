@@ -228,3 +228,18 @@ def test_mark_notification_read_raises_on_non_success_status() -> None:
     with pytest.raises(CircleClientError) as excinfo:
         client.mark_notification_read(9000001, execute=True)
     assert excinfo.value.status_code == 422
+
+
+def test_spaces_show_membership_detects_member_and_anonymous() -> None:
+    from circle_client_skill.client import spaces_show_membership
+
+    anonymous = {"records": [{"policies": {"can_create_post": False, "can_leave_space": None}}]}
+    member = {"records": [
+        {"policies": {"can_create_post": False, "can_leave_space": None}},
+        {"policies": {"can_create_post": True, "can_leave_space": False}},
+    ]}
+    assert spaces_show_membership(anonymous) is False
+    assert spaces_show_membership(member) is True
+    assert spaces_show_membership([{"policies": {"can_leave_space": True}}]) is True
+    assert spaces_show_membership({"records": "oops"}) is False
+    assert spaces_show_membership(None) is False

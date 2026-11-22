@@ -76,6 +76,25 @@ def _iter_record_pages(
     raise CircleClientError(f"pagination exceeded max_pages={max_pages}")
 
 
+
+def spaces_show_membership(payload: Any) -> bool:
+    """Return True when a /internal_api/spaces payload belongs to a signed-in member.
+
+    Public communities answer ``/internal_api/spaces`` for anonymous visitors too,
+    so a 200 alone proves nothing. For a signed-in member, every space the member
+    has joined carries a boolean ``policies.can_leave_space``; for an anonymous
+    session it is ``null`` everywhere.
+    """
+    records = payload.get("records", payload) if isinstance(payload, dict) else payload
+    if not isinstance(records, list):
+        return False
+    for space in records:
+        policies = space.get("policies") if isinstance(space, dict) else None
+        if isinstance(policies, dict) and policies.get("can_leave_space") is not None:
+            return True
+    return False
+
+
 class CircleClientError(RuntimeError):
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
         super().__init__(message)
@@ -458,6 +477,10 @@ class CircleClient:
     def list_spaces(self) -> dict[str, Any]:
         """List all visible spaces in the community."""
         return self._request("GET", f"{self.settings.base_url}/internal_api/spaces")
+
+    def session_is_member(self) -> bool:
+        """Check online whether the stored cookies are a signed-in member session."""
+        return spaces_show_membership(self.list_spaces())
 
     def get_space(self, space_id: int) -> dict[str, Any]:
         """Get metadata for a single space."""
