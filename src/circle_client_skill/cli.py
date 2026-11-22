@@ -13,7 +13,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .client import CircleClient, CircleClientError, spaces_show_membership
+from .client import (
+    SIGNED_IN_PROBE_PATH,
+    CircleClient,
+    CircleClientError,
+    is_closed_error,
+    is_login_url,
+    is_navigation_error,
+    origin_of,
+    signed_in_from_status,
+)
 from .config import (
     ConfigurationError,
     build_settings_from_cookies,
@@ -185,11 +194,21 @@ def cmd_auth_status(args: argparse.Namespace) -> None:
     }
     if getattr(args, "check", False):
         try:
-            status["member_session"] = CircleClient(settings).session_is_member()
+            status["signed_in"] = CircleClient(settings).session_is_signed_in()
         except CircleClientError as exc:
-            status["member_session"] = None
-            status["member_session_error"] = str(exc)
+            status["signed_in"] = None
+            status["signed_in_error"] = str(exc)
     print(json.dumps(status, ensure_ascii=False, indent=2) if args.json else format_auth_status(status))
+
+
+def positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from None
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return number
 
 
 def cmd_configure_browser(args: argparse.Namespace) -> None:
@@ -204,15 +223,22 @@ def cmd_configure_browser(args: argparse.Namespace) -> None:
 
     import asyncio
 
-    async def _safe_eval(page, expression: str):
-        # A login redirect can destroy the execution context mid-call; retry.
+    def _warn(message: str) -> None:
+        print(f"warning: {message}", file=sys.stderr, flush=True)
+
+    async def _safe_eval(page, expression: str, label: str):
+        # A login redirect can destroy the execution context mid-call; retry only that.
         for _ in range(5):
             try:
                 return await page.evaluate(expression)
-            except Exception:
+            except Exception as exc:  # classified below
+                if not is_navigation_error(exc):
+                    _warn(f"could not read {label}: {type(exc).__name__}")
+                    return None
                 with contextlib.suppress(Exception):
                     await page.wait_for_load_state("domcontentloaded", timeout=10000)
                 await asyncio.sleep(1)
+        _warn(f"could not read {label}: page kept navigating")
         return None
 
     async def _run() -> dict:
@@ -227,8 +253,9 @@ def cmd_configure_browser(args: argparse.Namespace) -> None:
                     {
                         "action": "browser_opened",
                         "url": args.url,
-                        "message": "Please log in to your Circle community. "
-                        "When you see the feed page, the script will continue automatically.",
+                        "message": "Please log in to your Circle community. The script continues "
+                        "automatically once a signed-in session is detected (seeing the feed "
+                        "is not enough on communities with public spaces).",
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -236,39 +263,55 @@ def cmd_configure_browser(args: argparse.Namespace) -> None:
                 flush=True,
             )
 
-            # Wait until the session is a signed-in member. Public communities show
-            # the feed to anonymous visitors, so the URL alone is not a login signal:
-            # poll /internal_api/spaces with this context's cookies instead.
-            parts = urlsplit(args.url)
-            spaces_url = f"{parts.scheme}://{parts.netloc}/internal_api/spaces"
+            # Public communities show the feed to anonymous visitors, so neither the URL
+            # nor a 200 from /internal_api/spaces proves a login. Poll an endpoint that
+            # answers 401 to anonymous sessions, on whatever host the tab has reached
+            # (the default app.circle.so URL can redirect to the community's own domain).
+            fallback_origin = origin_of(args.url)
             deadline = asyncio.get_running_loop().time() + args.timeout
-            logged_in = False
+            signed_in_origin = None
             while asyncio.get_running_loop().time() < deadline:
-                with contextlib.suppress(Exception):
-                    response = await context.request.get(
-                        spaces_url, headers={"Accept": "application/json"}
+                if page.is_closed() or not browser.is_connected():
+                    raise ConfigurationError(
+                        "The browser window was closed before login completed; nothing was saved."
                     )
-                    if response.ok and spaces_show_membership(await response.json()):
-                        logged_in = True
+                origin = origin_of(page.url) or fallback_origin
+                try:
+                    response = await context.request.get(
+                        f"{origin}{SIGNED_IN_PROBE_PATH}",
+                        headers={"Accept": "application/json"},
+                        max_redirects=0,
+                    )
+                    if signed_in_from_status(response.status):
+                        signed_in_origin = origin
                         break
+                except Exception as exc:  # classified below
+                    if is_closed_error(exc):
+                        raise ConfigurationError(
+                            "The browser window was closed before login completed; "
+                            "nothing was saved."
+                        ) from None
                 await asyncio.sleep(2)
-            if not logged_in:
-                await browser.close()
+            if signed_in_origin is None:
+                with contextlib.suppress(Exception):
+                    await browser.close()
                 raise ConfigurationError(
-                    "Timed out waiting for a signed-in member session; nothing was saved. "
+                    "Timed out waiting for a signed-in session; nothing was saved. "
                     "Log in inside the opened window, then rerun configure-browser."
                 )
 
-            # Let any post-login redirects finish before reading page state
+            # The session cookie can be set while the tab is still on the sign-in page or
+            # mid-redirect. Land on the community itself before reading page state.
+            if is_login_url(page.url) or origin_of(page.url) != signed_in_origin:
+                with contextlib.suppress(Exception):
+                    await page.goto(signed_in_origin, wait_until="domcontentloaded")
             with contextlib.suppress(Exception):
                 await page.wait_for_load_state("networkidle", timeout=15000)
             await asyncio.sleep(1)
 
-            # Extract cookies via CDP
             cookies = await context.cookies()
-            # Match by root domain: strip leading "www." or "." for comparison
-            target_domain = urlsplit(args.url).netloc
-            # Also match parent domain (e.g., www.community.example.com → community.example.com)
+            target_domain = urlsplit(signed_in_origin).netloc
+            # Also match parent domain (e.g., www.community.example.com -> community.example.com)
             root_domain = target_domain.removeprefix("www.")
             relevant = [
                 c for c in cookies
@@ -285,30 +328,28 @@ def cmd_configure_browser(args: argparse.Namespace) -> None:
             csrf = next((c for c in relevant if c["name"] == "csrf_token"), None)
             csrf_value = csrf["value"] if csrf else None
 
-            # Get user agent from the page
-            user_agent = await _safe_eval(page, "() => navigator.userAgent")
-
-            # Try to get frontend version from meta tag or window
+            user_agent = await _safe_eval(page, "() => navigator.userAgent", "user agent")
             frontend_version = await _safe_eval(
                 page,
                 "() => window.CIRCLE_APP_VERSION || "
-                "document.documentElement.getAttribute('data-circle-frontend-version') || null"
+                "document.documentElement.getAttribute('data-circle-frontend-version') || null",
+                "frontend version",
             )
-
-            # Extract community_id from localStorage (PunditUserContext)
             community_id = await _safe_eval(
                 page,
                 "() => { try { "
                 "const ctx = JSON.parse(localStorage.getItem('V1-PunditUserContext') || '{}'); "
                 "const c = ctx.state?.current_community || ctx.current_community || {}; "
                 "return String(c.id || ''); "
-                "} catch(e) { return ''; } }"
+                "} catch(e) { return ''; } }",
+                "community id",
             )
             community_id = community_id or None
 
             await browser.close()
 
             return {
+                "community_url": signed_in_origin,
                 "cookie_header": cookie_header,
                 "csrf_token": csrf_value,
                 "user_agent": user_agent,
@@ -320,7 +361,7 @@ def cmd_configure_browser(args: argparse.Namespace) -> None:
     result = asyncio.run(_run())
 
     settings = build_settings_from_cookies(
-        community_url=args.url,
+        community_url=result["community_url"],
         cookie_header=result["cookie_header"],
         csrf_token=result["csrf_token"],
         user_agent=result["user_agent"],
@@ -335,7 +376,7 @@ def cmd_configure_browser(args: argparse.Namespace) -> None:
             {
                 "success": True,
                 "env_file": str(env_path.resolve()),
-                "host": urlsplit(args.url).netloc,
+                "host": urlsplit(result["community_url"]).netloc,
                 "cookie_count": result["cookie_count"],
                 "csrf_saved": bool(result["csrf_token"]),
             },
@@ -343,7 +384,6 @@ def cmd_configure_browser(args: argparse.Namespace) -> None:
             indent=2,
         )
     )
-
 
 def cmd_open_browser(args: argparse.Namespace) -> None:
     """Open a visible Chrome logged in with the saved session; never writes Circle data."""
@@ -1447,9 +1487,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     configure_browser.add_argument(
         "--timeout",
-        type=int,
+        type=positive_int,
         default=300,
-        help="Seconds to wait for a signed-in member session (default: 300)",
+        help="Seconds to wait for a signed-in session (default: 300)",
     )
     configure_browser.set_defaults(handler=cmd_configure_browser)
 
@@ -1473,7 +1513,7 @@ def build_parser() -> argparse.ArgumentParser:
     auth_status.add_argument(
         "--check",
         action="store_true",
-        help="Also call the community to verify the cookies are a signed-in member session",
+        help="Also call the community to verify the cookies are a signed-in session",
     )
     auth_status.set_defaults(handler=cmd_auth_status)
 

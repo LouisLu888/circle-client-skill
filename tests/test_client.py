@@ -230,16 +230,67 @@ def test_mark_notification_read_raises_on_non_success_status() -> None:
     assert excinfo.value.status_code == 422
 
 
-def test_spaces_show_membership_detects_member_and_anonymous() -> None:
-    from circle_client_skill.client import spaces_show_membership
 
-    anonymous = {"records": [{"policies": {"can_create_post": False, "can_leave_space": None}}]}
-    member = {"records": [
-        {"policies": {"can_create_post": False, "can_leave_space": None}},
-        {"policies": {"can_create_post": True, "can_leave_space": False}},
-    ]}
-    assert spaces_show_membership(anonymous) is False
-    assert spaces_show_membership(member) is True
-    assert spaces_show_membership([{"policies": {"can_leave_space": True}}]) is True
-    assert spaces_show_membership({"records": "oops"}) is False
-    assert spaces_show_membership(None) is False
+def _probe_settings(authorization: str | None = None) -> CircleSettings:
+    return CircleSettings(
+        notifications_url="https://community.example.com/internal_api/notifications",
+        count_url="https://community.example.com/internal_api/notifications/new_notifications_count",
+        reset_count_url="https://community.example.com/internal_api/notifications/mark_all_as_read",
+        cookie="session=synthetic",
+        csrf_token="synthetic-csrf",
+        authorization=authorization,
+    )
+
+
+class StatusSession:
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        self.calls: list[dict[str, Any]] = []
+
+    def get(self, url: str, **kwargs: Any) -> FakeResponse:
+        self.calls.append({"url": url, **kwargs})
+        response = FakeResponse({})
+        response.status_code = self.status_code
+        return response
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [(200, True), (401, False), (403, False), (302, False)],
+)
+def test_session_is_signed_in_maps_probe_status(status: int, expected: bool) -> None:
+    client = CircleClient(_probe_settings(authorization="Bearer synthetic.jwt.value"))
+    session = StatusSession(status)
+    client.session = session  # type: ignore[assignment]
+    assert client.session_is_signed_in() is expected
+    call = session.calls[0]
+    assert call["url"].endswith("/internal_api/notification_preferences")
+    assert call["allow_redirects"] is False
+    # The cookie session is what writes use; the JWT must not decide the verdict.
+    assert "Authorization" not in call["headers"]
+
+
+def test_session_is_signed_in_raises_on_unexpected_status() -> None:
+    client = CircleClient(_probe_settings())
+    client.session = StatusSession(500)  # type: ignore[assignment]
+    with pytest.raises(CircleClientError, match="HTTP 500"):
+        client.session_is_signed_in()
+
+
+def test_url_and_error_helpers() -> None:
+    from circle_client_skill.client import (
+        is_closed_error,
+        is_login_url,
+        is_navigation_error,
+        origin_of,
+        signed_in_from_status,
+    )
+
+    assert origin_of("https://community.example.com/c/posts?x=1") == "https://community.example.com"
+    assert origin_of("about:blank") is None
+    assert is_login_url("https://auth.example.com/sign_in")
+    assert not is_login_url("https://community.example.com/feed")
+    assert is_navigation_error(Exception("Execution context was destroyed, most likely because of a navigation"))
+    assert not is_navigation_error(Exception("ReferenceError: foo is not defined"))
+    assert is_closed_error(Exception("Target page, context or browser has been closed"))
+    assert signed_in_from_status(500) is None

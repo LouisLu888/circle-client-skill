@@ -357,12 +357,15 @@ def format_auth_status(status: dict) -> str:
         f"configured: {configured}   host: {status.get('host', '')}\n"
         f"cookie: {cookie}   csrf: {csrf}   jwt: {jwt}"
     )
-    if "member_session" in status:
-        member = status["member_session"]
-        label = {True: "yes", False: "no (anonymous cookies; rerun configure-browser)"}.get(
-            member, f"unknown ({status.get('member_session_error', '')})"
-        )
-        text += f"\nmember session: {label}"
+    if "signed_in" in status:
+        signed_in = status["signed_in"]
+        if signed_in is True:
+            label = "yes"
+        elif signed_in is False:
+            label = "no (anonymous cookies; rerun configure-browser)"
+        else:
+            label = f"unknown ({status.get('signed_in_error', '')})"
+        text += f"\nsigned in: {label}"
     return text
 
 

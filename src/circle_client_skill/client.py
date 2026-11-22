@@ -77,22 +77,46 @@ def _iter_record_pages(
 
 
 
-def spaces_show_membership(payload: Any) -> bool:
-    """Return True when a /internal_api/spaces payload belongs to a signed-in member.
+# Answers 401 to anonymous visitors and 200 to any signed-in user, whether or not the
+# user has joined a space. Public communities answer /internal_api/spaces anonymously,
+# so a successful read there proves nothing about the session.
+SIGNED_IN_PROBE_PATH = "/internal_api/notification_preferences"
 
-    Public communities answer ``/internal_api/spaces`` for anonymous visitors too,
-    so a 200 alone proves nothing. For a signed-in member, every space the member
-    has joined carries a boolean ``policies.can_leave_space``; for an anonymous
-    session it is ``null`` everywhere.
-    """
-    records = payload.get("records", payload) if isinstance(payload, dict) else payload
-    if not isinstance(records, list):
+
+def signed_in_from_status(status_code: int) -> bool | None:
+    """Map a SIGNED_IN_PROBE_PATH status to signed in (True), anonymous (False) or unknown."""
+    if status_code == 200:
+        return True
+    if status_code in (401, 403) or 300 <= status_code < 400:
         return False
-    for space in records:
-        policies = space.get("policies") if isinstance(space, dict) else None
-        if isinstance(policies, dict) and policies.get("can_leave_space") is not None:
-            return True
-    return False
+    return None
+
+
+def origin_of(url: str) -> str | None:
+    """scheme://host of an http(s) URL, or None for about:blank and the like."""
+    parts = urlsplit(url or "")
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return None
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def is_login_url(url: str) -> bool:
+    lowered = (url or "").lower()
+    return "login" in lowered or "sign_in" in lowered or "sign-in" in lowered
+
+
+def is_navigation_error(exc: BaseException) -> bool:
+    text = str(exc)
+    return "Execution context was destroyed" in text or "navigation" in text.lower()
+
+
+def is_closed_error(exc: BaseException) -> bool:
+    text = str(exc)
+    return any(
+        marker in text
+        for marker in ("Target page, context or browser has been closed", "Browser has been closed",
+                       "Connection closed", "Target closed")
+    )
 
 
 class CircleClientError(RuntimeError):
@@ -478,9 +502,30 @@ class CircleClient:
         """List all visible spaces in the community."""
         return self._request("GET", f"{self.settings.base_url}/internal_api/spaces")
 
-    def session_is_member(self) -> bool:
-        """Check online whether the stored cookies are a signed-in member session."""
-        return spaces_show_membership(self.list_spaces())
+    def session_is_signed_in(self) -> bool:
+        """Check online whether the stored cookie + CSRF session is signed in.
+
+        Sends the cookie session only (no Authorization header), since that is what
+        writes use; a stale JWT must not mask a good cookie or the other way round.
+        """
+        headers = self.settings.headers()
+        headers.pop("Authorization", None)
+        try:
+            response = self.session.get(
+                f"{self.settings.base_url}{SIGNED_IN_PROBE_PATH}",
+                headers=headers,
+                timeout=self.timeout,
+                allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            raise CircleClientError(f"Circle request failed: {type(exc).__name__}") from exc
+        verdict = signed_in_from_status(response.status_code)
+        if verdict is None:
+            raise CircleClientError(
+                f"Circle returned HTTP {response.status_code}",
+                status_code=response.status_code,
+            )
+        return verdict
 
     def get_space(self, space_id: int) -> dict[str, Any]:
         """Get metadata for a single space."""
