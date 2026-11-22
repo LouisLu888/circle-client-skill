@@ -93,7 +93,7 @@ description: >-
 .venv/bin/circle-client configure-browser --url https://your-community.circle.so
 ```
 
-打开一个可见浏览器窗口，登录后自动提取 cookie + CSRF + community_id，写入 `.env`。不需要 DevTools，不需要 Copy as cURL。
+打开一个可见浏览器窗口，登录后自动提取 cookie + CSRF + community_id，写入 `.env`。不需要 DevTools，不需要 Copy as cURL。命令会轮询 `/internal_api/spaces`，直到确认是已登录成员会话才保存；公开社区首页匿名也能看，所以看到 feed 不等于登录完成。默认等 300 秒（`--timeout` 可调），超时不写 `.env`。
 
 需要 Playwright：`uv pip install -e '.[browser]'` + `python -m playwright install chromium`
 
@@ -110,7 +110,7 @@ description: >-
 ### 验证
 
 ```bash
-.venv/bin/circle-client auth-status
+.venv/bin/circle-client auth-status --check  # member session: yes 才能做写操作
 .venv/bin/circle-client count  # 快速验证凭证是否有效
 ```
 
