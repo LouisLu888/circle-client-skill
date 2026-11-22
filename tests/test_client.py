@@ -306,3 +306,17 @@ def test_url_and_error_helpers() -> None:
     assert signed_in_from_response(200, "application/json; charset=utf-8") is True
     # An SSO host or SPA shell answers every path with 200 HTML: not a sign-in.
     assert signed_in_from_response(200, "text/html; charset=utf-8") is None
+
+
+def test_cookie_domain_matches_whole_labels_only() -> None:
+    from circle_client_skill.client import cookie_domain_matches
+
+    assert cookie_domain_matches(".circle.so", "app.circle.so")
+    assert cookie_domain_matches("community.example.com", "community.example.com")
+    assert cookie_domain_matches(".example.com", "www.community.example.com")
+    # The detected host can come from any page the tab reached during login; a host
+    # that merely ends with the same characters must not receive the session cookies.
+    assert not cookie_domain_matches(".circle.so", "le.so")
+    assert not cookie_domain_matches(".circle.so", "evilcircle.so")
+    assert not cookie_domain_matches("community.example.com", "example.com")
+    assert not cookie_domain_matches("", "example.com")

@@ -17,6 +17,7 @@ from .client import (
     SIGNED_IN_PROBE_PATH,
     CircleClient,
     CircleClientError,
+    cookie_domain_matches,
     is_closed_error,
     is_login_url,
     is_navigation_error,
@@ -319,14 +320,10 @@ def cmd_configure_browser(args: argparse.Namespace) -> None:
             await asyncio.sleep(1)
 
             cookies = await context.cookies()
-            target_domain = urlsplit(signed_in_origin).netloc
-            # Also match parent domain (e.g., www.community.example.com -> community.example.com)
-            root_domain = target_domain.removeprefix("www.")
+            target_domain = urlsplit(signed_in_origin).hostname or ""
+            # Keep exactly the cookies the browser sends to this host (incl. parent-domain ones).
             relevant = [
-                c for c in cookies
-                if target_domain in c.get("domain", "")
-                or root_domain in c.get("domain", "")
-                or c.get("domain", "").lstrip(".") in (target_domain, root_domain)
+                c for c in cookies if cookie_domain_matches(c.get("domain", ""), target_domain)
             ]
             if not relevant:
                 raise ConfigurationError(
@@ -393,6 +390,7 @@ def cmd_configure_browser(args: argparse.Namespace) -> None:
             indent=2,
         )
     )
+
 
 def cmd_open_browser(args: argparse.Namespace) -> None:
     """Open a visible Chrome logged in with the saved session; never writes Circle data."""

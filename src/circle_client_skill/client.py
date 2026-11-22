@@ -76,7 +76,6 @@ def _iter_record_pages(
     raise CircleClientError(f"pagination exceeded max_pages={max_pages}")
 
 
-
 # Answers 401 to anonymous visitors and 200 to any signed-in user, whether or not the
 # user has joined a space. Public communities answer /internal_api/spaces anonymously,
 # so a successful read there proves nothing about the session.
@@ -101,6 +100,18 @@ def origin_of(url: str) -> str | None:
     if parts.scheme not in ("http", "https") or not parts.netloc:
         return None
     return f"{parts.scheme}://{parts.netloc}"
+
+
+def cookie_domain_matches(cookie_domain: str, host: str) -> bool:
+    """Whether a browser would send a cookie for `cookie_domain` to `host`.
+
+    Matches on whole labels: a cookie for `.circle.so` belongs to `app.circle.so`,
+    never to `le.so`. The detected host can come from whatever page the tab is on,
+    so a substring match would hand the community's cookies to an unrelated host.
+    """
+    domain = (cookie_domain or "").lstrip(".").lower()
+    host = (host or "").lower()
+    return bool(domain) and (host == domain or host.endswith("." + domain))
 
 
 def is_login_url(url: str) -> bool:
