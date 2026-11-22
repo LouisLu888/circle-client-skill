@@ -243,14 +243,16 @@ def _probe_settings(authorization: str | None = None) -> CircleSettings:
 
 
 class StatusSession:
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int, content_type: str = "application/json; charset=utf-8") -> None:
         self.status_code = status_code
+        self.content_type = content_type
         self.calls: list[dict[str, Any]] = []
 
     def get(self, url: str, **kwargs: Any) -> FakeResponse:
         self.calls.append({"url": url, **kwargs})
         response = FakeResponse({})
         response.status_code = self.status_code
+        response.headers = {"content-type": self.content_type}
         return response
 
 
@@ -270,6 +272,13 @@ def test_session_is_signed_in_maps_probe_status(status: int, expected: bool) -> 
     assert "Authorization" not in call["headers"]
 
 
+def test_session_is_signed_in_rejects_html_200_from_non_community_host() -> None:
+    client = CircleClient(_probe_settings())
+    client.session = StatusSession(200, "text/html; charset=utf-8")  # type: ignore[assignment]
+    with pytest.raises(CircleClientError, match="community itself"):
+        client.session_is_signed_in()
+
+
 def test_session_is_signed_in_raises_on_unexpected_status() -> None:
     client = CircleClient(_probe_settings())
     client.session = StatusSession(500)  # type: ignore[assignment]
@@ -283,7 +292,7 @@ def test_url_and_error_helpers() -> None:
         is_login_url,
         is_navigation_error,
         origin_of,
-        signed_in_from_status,
+        signed_in_from_response,
     )
 
     assert origin_of("https://community.example.com/c/posts?x=1") == "https://community.example.com"
@@ -293,4 +302,7 @@ def test_url_and_error_helpers() -> None:
     assert is_navigation_error(Exception("Execution context was destroyed, most likely because of a navigation"))
     assert not is_navigation_error(Exception("ReferenceError: foo is not defined"))
     assert is_closed_error(Exception("Target page, context or browser has been closed"))
-    assert signed_in_from_status(500) is None
+    assert signed_in_from_response(500, "application/json") is None
+    assert signed_in_from_response(200, "application/json; charset=utf-8") is True
+    # An SSO host or SPA shell answers every path with 200 HTML: not a sign-in.
+    assert signed_in_from_response(200, "text/html; charset=utf-8") is None

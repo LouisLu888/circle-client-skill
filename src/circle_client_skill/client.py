@@ -83,10 +83,13 @@ def _iter_record_pages(
 SIGNED_IN_PROBE_PATH = "/internal_api/notification_preferences"
 
 
-def signed_in_from_status(status_code: int) -> bool | None:
-    """Map a SIGNED_IN_PROBE_PATH status to signed in (True), anonymous (False) or unknown."""
+def signed_in_from_response(status_code: int, content_type: str | None) -> bool | None:
+    """Map a SIGNED_IN_PROBE_PATH response to signed in (True), anonymous (False) or unknown.
+
+    Only a JSON 200 counts: an SSO host or SPA shell answers any path with 200 HTML.
+    """
     if status_code == 200:
-        return True
+        return "json" in (content_type or "").lower() or None
     if status_code in (401, 403) or 300 <= status_code < 400:
         return False
     return None
@@ -510,6 +513,7 @@ class CircleClient:
         """
         headers = self.settings.headers()
         headers.pop("Authorization", None)
+        headers["Accept"] = "application/json"
         try:
             response = self.session.get(
                 f"{self.settings.base_url}{SIGNED_IN_PROBE_PATH}",
@@ -519,10 +523,14 @@ class CircleClient:
             )
         except requests.RequestException as exc:
             raise CircleClientError(f"Circle request failed: {type(exc).__name__}") from exc
-        verdict = signed_in_from_status(response.status_code)
+        verdict = signed_in_from_response(
+            response.status_code, response.headers.get("content-type")
+        )
         if verdict is None:
             raise CircleClientError(
-                f"Circle returned HTTP {response.status_code}",
+                f"Circle returned HTTP {response.status_code} "
+                f"({response.headers.get('content-type') or 'no content-type'}); "
+                "is the configured host the community itself?",
                 status_code=response.status_code,
             )
         return verdict

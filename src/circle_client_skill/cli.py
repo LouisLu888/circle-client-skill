@@ -21,7 +21,7 @@ from .client import (
     is_login_url,
     is_navigation_error,
     origin_of,
-    signed_in_from_status,
+    signed_in_from_response,
 )
 from .config import (
     ConfigurationError,
@@ -267,7 +267,7 @@ def cmd_configure_browser(args: argparse.Namespace) -> None:
             # nor a 200 from /internal_api/spaces proves a login. Poll an endpoint that
             # answers 401 to anonymous sessions, on whatever host the tab has reached
             # (the default app.circle.so URL can redirect to the community's own domain).
-            fallback_origin = origin_of(args.url)
+            requested_origin = origin_of(args.url)
             deadline = asyncio.get_running_loop().time() + args.timeout
             signed_in_origin = None
             while asyncio.get_running_loop().time() < deadline:
@@ -275,22 +275,31 @@ def cmd_configure_browser(args: argparse.Namespace) -> None:
                     raise ConfigurationError(
                         "The browser window was closed before login completed; nothing was saved."
                     )
-                origin = origin_of(page.url) or fallback_origin
-                try:
-                    response = await context.request.get(
-                        f"{origin}{SIGNED_IN_PROBE_PATH}",
-                        headers={"Accept": "application/json"},
-                        max_redirects=0,
-                    )
-                    if signed_in_from_status(response.status):
-                        signed_in_origin = origin
-                        break
-                except Exception as exc:  # classified below
-                    if is_closed_error(exc):
-                        raise ConfigurationError(
-                            "The browser window was closed before login completed; "
-                            "nothing was saved."
-                        ) from None
+                # Never probe the SSO/login host: it is not the community.
+                candidates = [requested_origin]
+                page_origin = origin_of(page.url)
+                if page_origin and page_origin not in candidates and not is_login_url(page.url):
+                    candidates.append(page_origin)
+                for origin in candidates:
+                    try:
+                        response = await context.request.get(
+                            f"{origin}{SIGNED_IN_PROBE_PATH}",
+                            headers={"Accept": "application/json"},
+                            max_redirects=0,
+                        )
+                        if signed_in_from_response(
+                            response.status, response.headers.get("content-type")
+                        ):
+                            signed_in_origin = origin
+                            break
+                    except Exception as exc:  # classified below
+                        if is_closed_error(exc):
+                            raise ConfigurationError(
+                                "The browser window was closed before login completed; "
+                                "nothing was saved."
+                            ) from None
+                if signed_in_origin:
+                    break
                 await asyncio.sleep(2)
             if signed_in_origin is None:
                 with contextlib.suppress(Exception):
